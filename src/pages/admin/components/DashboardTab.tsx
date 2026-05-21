@@ -151,7 +151,13 @@ export default function DashboardTab() {
   const revenueTrend = kpi?.revenue.changePercent || 0
   const bookings = kpi?.bookings.total || 0
   const bookingsTrend = kpi?.bookings.changePercent || 0
-  const conversionRate = kpi?.bookings.conversionRate || 0
+  // Conversion Rate = preventivi accettati / preventivi totali del periodo.
+  // Misura quanto del lead funnel (preventivo) si converte in noleggio
+  // effettivo. Piu' significativo del rapport prenotaz./visitor che
+  // dipende dal traffico esterno.
+  const conversionRate = (extra && extra.preventiviTotal > 0)
+    ? (extra.preventiviAccepted / extra.preventiviTotal) * 100
+    : 0
 
   const trafficDaily = buildDaily(12458, 3)
   const revenueDaily = buildDaily(revenue, 0)
@@ -212,7 +218,7 @@ export default function DashboardTab() {
 
         {/* ROW 1 — 6 KPI cards */}
         <div className="grid grid-cols-3 lg:grid-cols-6 gap-2 flex-shrink-0">
-          <KpiCard label="Visitatori" value="12.458" trend={19.8} gradient="bg-gradient-to-br from-purple-600 to-purple-800"
+          <KpiCard label="Clienti Totali" value={fmt(kpi?.customers.totalCustomers || 0)} trend={kpi?.customers.changePercent} gradient="bg-gradient-to-br from-purple-600 to-purple-800"
             icon={<svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" /></svg>} />
           <KpiCard label="Conversion Rate" value={`${conversionRate.toFixed(2)}%`} trend={6.79} gradient="bg-gradient-to-br from-cyan-500 to-blue-700"
             icon={<svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>} />
