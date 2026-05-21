@@ -14,7 +14,7 @@ import { authFetch } from '../../../utils/authFetch'
 import { supabase } from '../../../supabaseClient'
 import {
   ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid,
-  PieChart, Pie, Cell, BarChart, Bar, LineChart, Line,
+  PieChart, Pie, Cell,
 } from 'recharts'
 
 function fmtEur(n: number): string {
