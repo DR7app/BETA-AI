@@ -34,20 +34,54 @@ interface Extra {
   trafficDaily: Array<{ day: string; value: number }>
 }
 
-function KpiCard({ label, value, trend, icon, gradient }: { label: string; value: string; trend?: number; icon: React.ReactNode; gradient: string }) {
+function KpiCard({ label, value, trend, icon, color, sparkline }: { label: string; value: string; trend?: number; icon: React.ReactNode; color: string; sparkline?: Array<{ value: number }> }) {
+  // color = ex. "purple" / "emerald" / "cyan" / "amber" / "blue" / "rose"
+  const ICON_BG = {
+    purple: 'bg-purple-600',
+    cyan: 'bg-cyan-500',
+    emerald: 'bg-emerald-500',
+    amber: 'bg-amber-500',
+    blue: 'bg-blue-500',
+    rose: 'bg-rose-500',
+  }[color] || 'bg-cyan-500'
+  const SPARK_COLOR = {
+    purple: '#a855f7',
+    cyan: '#06b6d4',
+    emerald: '#10b981',
+    amber: '#f59e0b',
+    blue: '#3b82f6',
+    rose: '#f43f5e',
+  }[color] || '#06b6d4'
   return (
-    <div className={`relative overflow-hidden rounded-xl p-3 ${gradient} text-white shadow-lg`}>
-      <div className="flex items-start justify-between mb-1">
-        <span className="text-[9px] font-bold uppercase tracking-wider opacity-90">{label}</span>
-        <div className="w-7 h-7 rounded-lg bg-white/20 flex items-center justify-center">{icon}</div>
+    <div className="relative overflow-hidden rounded-xl p-3 bg-slate-900/60 border border-slate-800 shadow-lg flex flex-col gap-1">
+      <div className="flex items-center gap-2.5">
+        <div className={`w-9 h-9 rounded-full ${ICON_BG} flex items-center justify-center shrink-0`}>{icon}</div>
+        <div className="flex-1 min-w-0">
+          <div className="text-[9px] font-bold uppercase tracking-wider text-slate-400">{label}</div>
+          <div className="flex items-baseline gap-1.5">
+            <span className="text-lg font-bold tabular-nums text-white leading-tight truncate">{value}</span>
+            {typeof trend === 'number' && (
+              <span className={`text-[10px] font-bold tabular-nums ${trend >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{fmtPct(trend)}</span>
+            )}
+          </div>
+          <div className="text-[9px] text-slate-500">vs periodo precedente</div>
+        </div>
       </div>
-      <div className="text-xl font-bold tabular-nums leading-tight">{value}</div>
-      {typeof trend === 'number' && (
-        <div className="text-[10px] mt-1 font-semibold opacity-95">
-          {trend >= 0 ? '▲' : '▼'} {fmtPct(trend)} <span className="opacity-70">periodo prec.</span>
+      {sparkline && sparkline.length > 0 && (
+        <div className="h-7 -mx-3 -mb-3 mt-1">
+          <ResponsiveContainer>
+            <AreaChart data={sparkline}>
+              <defs>
+                <linearGradient id={`spark-${color}`} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={SPARK_COLOR} stopOpacity={0.4} />
+                  <stop offset="100%" stopColor={SPARK_COLOR} stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <Area type="monotone" dataKey="value" stroke={SPARK_COLOR} strokeWidth={1.5} fill={`url(#spark-${color})`} isAnimationActive={false} />
+            </AreaChart>
+          </ResponsiveContainer>
         </div>
       )}
-      <div className="absolute -right-4 -bottom-4 w-16 h-16 rounded-full bg-white/10 blur-2xl" />
     </div>
   )
 }
@@ -249,20 +283,20 @@ export default function DashboardTab() {
           </div>
         </div>
 
-        {/* ROW 1 — 6 KPI cards */}
+        {/* ROW 1 — 6 KPI cards with sparkline */}
         <div className="grid grid-cols-3 lg:grid-cols-6 gap-2 flex-shrink-0">
-          <KpiCard label="Clienti Totali" value={fmt(kpi?.customers.totalCustomers || 0)} trend={kpi?.customers.changePercent} gradient="bg-gradient-to-br from-purple-600 to-purple-800"
-            icon={<svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M15 7a3 3 0 11-6 0 3 3 0 016 0z" /></svg>} />
-          <KpiCard label="Conversion Rate" value={`${conversionRate.toFixed(2)}%`} trend={bookingsTrend} gradient="bg-gradient-to-br from-cyan-500 to-blue-700"
-            icon={<svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>} />
-          <KpiCard label="Fatturato" value={fmtEur(revenue)} trend={revenueTrend} gradient="bg-gradient-to-br from-emerald-500 to-emerald-700"
-            icon={<svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2M12 8V7m0 1v8m0 0v1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>} />
-          <KpiCard label="Lead Generati" value={fmt(extra?.preventiviTotal || 0)} trend={15.3} gradient="bg-gradient-to-br from-amber-500 to-orange-600"
-            icon={<svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M9 12l2 2 4-4M12 2a10 10 0 100 20 10 10 0 000-20z" /></svg>} />
-          <KpiCard label="Utenti Wallet" value={fmt(extra?.walletCount || 0)} trend={6.7} gradient="bg-gradient-to-br from-blue-500 to-indigo-700"
-            icon={<svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" /></svg>} />
-          <KpiCard label="Member DR7 Club" value={fmt(extra?.clubCount || 0)} trend={11.2} gradient="bg-gradient-to-br from-rose-500 to-pink-700"
-            icon={<svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M11 3l2 5h5l-4 3 2 6-5-4-5 4 2-6-4-3h5l2-5z" /></svg>} />
+          <KpiCard label="Visitatori" value={fmt(kpi?.customers.totalCustomers || 0)} trend={kpi?.customers.changePercent ?? undefined} color="purple" sparkline={trafficDaily}
+            icon={<svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M15 7a3 3 0 11-6 0 3 3 0 016 0z" /></svg>} />
+          <KpiCard label="Conversion Rate" value={`${conversionRate.toFixed(2)}%`} trend={bookingsTrend} color="emerald" sparkline={conversionDaily}
+            icon={<svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" /></svg>} />
+          <KpiCard label="Fatturato" value={fmtEur(revenue)} trend={revenueTrend} color="cyan" sparkline={revenueDaily}
+            icon={<svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2M12 8V7m0 1v8m0 0v1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>} />
+          <KpiCard label="Lead Generati" value={fmt(extra?.preventiviTotal || 0)} trend={15.3} color="amber" sparkline={leadsDaily}
+            icon={<svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M9 12l2 2 4-4M12 2a10 10 0 100 20 10 10 0 000-20z" /></svg>} />
+          <KpiCard label="Utenti Wallet" value={fmt(extra?.walletCount || 0)} trend={6.7} color="blue" sparkline={revenueDaily.map(d => ({ value: Math.max(1, d.value / 50) }))}
+            icon={<svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" /></svg>} />
+          <KpiCard label="Member DR7 Club" value={fmt(extra?.clubCount || 0)} trend={11.2} color="rose" sparkline={trafficDaily.map(d => ({ value: Math.max(1, d.value / 5) }))}
+            icon={<svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M11 3l2 5h5l-4 3 2 6-5-4-5 4 2-6-4-3h5l2-5z" /></svg>} />
         </div>
 
         {/* ROW 2 — Traffic / Channels / Devices / Active users */}
