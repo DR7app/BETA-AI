@@ -1,12 +1,6 @@
 /**
  * DashboardTab — Dashboard Overview pixel-match mockup BETA 2026-05-21.
- *
- * Layout one-page denso (no scroll on >=1080p):
- *  R1: 6 KPI cards gradient (Visitatori/ConvRate/Fatturato/Lead/Wallet/Club)
- *  R2: Traffic area + Canali donut + Dispositivi donut + Utenti attivi bar
- *  R3: Funnel + Conversione area + Fatturato area + Lead area
- *  R4: Clienti donut + DR7 Ecosystem + Performance + Marketing + Top Auto
- *  R5: Alert banner
+ * Real data dal supabase + dashboard-kpi endpoint.
  */
 import { useState, useEffect, useCallback } from 'react'
 import { authFetch } from '../../../utils/authFetch'
@@ -34,6 +28,10 @@ interface Extra {
   preventiviTotal: number; preventiviAccepted: number; preventiviLost: number
   topVehicles: Array<{ name: string; image: string | null; views: number }>
   customerTypes: Array<{ name: string; value: number; color: string }>
+  revenueDaily: Array<{ day: string; value: number }>
+  conversionDaily: Array<{ day: string; value: number }>
+  leadsDaily: Array<{ day: string; value: number }>
+  trafficDaily: Array<{ day: string; value: number }>
 }
 
 function KpiCard({ label, value, trend, icon, gradient }: { label: string; value: string; trend?: number; icon: React.ReactNode; gradient: string }) {
@@ -88,14 +86,25 @@ export default function DashboardTab() {
   const loadData = useCallback(async () => {
     setLoading(true)
     try {
-      const [kpiRes, walletsRes, clubRes, prevRes, prevAccRes, vehiclesRes, custTypesRes] = await Promise.all([
+      const [kpiRes, walletsRes, clubRes, prevRes, prevAccRes, vehiclesRes, custTypesRes, bookingsDailyRes, preventiviDailyRes, bookingsByVehicleRes] = await Promise.all([
         authFetch(`/.netlify/functions/dashboard-kpi?from=${dateFrom}&to=${dateTo}`),
         supabase.from('wallets').select('balance', { count: 'exact' }).gt('balance', 0),
         supabase.from('customer_memberships').select('id', { count: 'exact' }).eq('status', 'active'),
         supabase.from('preventivi').select('total_final, status', { count: 'exact' }).gte('created_at', dateFrom).lte('created_at', dateTo + 'T23:59:59'),
         supabase.from('preventivi').select('id', { count: 'exact' }).eq('status', 'accettato').gte('created_at', dateFrom).lte('created_at', dateTo + 'T23:59:59'),
-        supabase.from('vehicles').select('id, display_name, metadata').neq('status', 'retired').limit(5),
+        supabase.from('vehicles').select('id, display_name, metadata').neq('status', 'retired').limit(50),
         supabase.from('customers_extended').select('tipo_cliente').limit(5000),
+        // REAL daily aggregates
+        supabase.from('bookings').select('created_at, price_total, status, payment_status')
+          .gte('created_at', dateFrom).lte('created_at', dateTo + 'T23:59:59')
+          .neq('status', 'cancelled').neq('status', 'annullata'),
+        supabase.from('preventivi').select('created_at, status')
+          .gte('created_at', dateFrom).lte('created_at', dateTo + 'T23:59:59'),
+        // Bookings by vehicle (90j) per Top Auto reale
+        supabase.from('bookings').select('vehicle_id, vehicle_name')
+          .gte('created_at', new Date(Date.now() - 90 * 86400000).toISOString())
+          .neq('status', 'cancelled').neq('status', 'annullata')
+          .not('vehicle_id', 'is', null),
       ])
       if (kpiRes.ok) setKpi(await kpiRes.json())
       const walletCount = (walletsRes as { count?: number | null }).count || 0
@@ -106,10 +115,27 @@ export default function DashboardTab() {
       const preventiviLost = ((prevRes.data as Array<{ status: string; total_final: number }>) || [])
         .filter(p => p.status === 'rifiutato' || p.status === 'scaduto')
         .reduce((s, p) => s + Number(p.total_final || 0), 0)
-      const topVehicles = (vehiclesRes.data || []).map(v => {
+
+      // Top Vehicles by real booking count (90j)
+      const countByVeh = new Map<string, { name: string; count: number }>()
+      for (const b of ((bookingsByVehicleRes.data as Array<{ vehicle_id: string; vehicle_name: string }>) || [])) {
+        const c = countByVeh.get(b.vehicle_id)
+        if (c) c.count++
+        else countByVeh.set(b.vehicle_id, { name: b.vehicle_name || 'Veicolo', count: 1 })
+      }
+      const ranked = Array.from(countByVeh.entries()).sort((a, b) => b[1].count - a[1].count).slice(0, 5)
+      const imgById = new Map<string, string | null>()
+      for (const v of (vehiclesRes.data || [])) {
         const meta = (v.metadata || {}) as { image_url?: string }
-        return { name: v.display_name || 'Veicolo', image: meta.image_url || null, views: 0 }
-      })
+        imgById.set(v.id as string, meta.image_url || null)
+      }
+      const topVehicles = ranked.length > 0
+        ? ranked.map(([vid, info]) => ({ name: info.name, image: imgById.get(vid) || null, views: info.count }))
+        : (vehiclesRes.data || []).slice(0, 5).map(v => {
+            const meta = (v.metadata || {}) as { image_url?: string }
+            return { name: v.display_name || 'Veicolo', image: meta.image_url || null, views: 0 }
+          })
+
       const types = new Map<string, number>()
       for (const c of (custTypesRes.data || [])) {
         const t = (c.tipo_cliente || 'privato').toLowerCase()
@@ -120,11 +146,54 @@ export default function DashboardTab() {
         name: name === 'privato' ? 'Standard' : name === 'azienda' ? 'Member' : name.charAt(0).toUpperCase() + name.slice(1),
         value, color: PALETTE[i % PALETTE.length],
       }))
+
+      // REAL daily aggregates
+      const days: string[] = []
+      const startMs = new Date(dateFrom).getTime()
+      const endMs = new Date(dateTo).getTime()
+      const totalDays = Math.min(31, Math.floor((endMs - startMs) / 86400000) + 1)
+      for (let i = 0; i < totalDays; i++) {
+        const d = new Date(startMs + i * 86400000)
+        days.push(d.toISOString().slice(0, 10))
+      }
+      const revByDay = new Map<string, number>()
+      const bookByDay = new Map<string, number>()
+      for (const b of ((bookingsDailyRes.data as Array<{ created_at: string; price_total: number }>) || [])) {
+        const k = (b.created_at || '').slice(0, 10)
+        if (!k) continue
+        revByDay.set(k, (revByDay.get(k) || 0) + (Number(b.price_total || 0) / 100))
+        bookByDay.set(k, (bookByDay.get(k) || 0) + 1)
+      }
+      const prevByDay = new Map<string, { total: number; accepted: number }>()
+      for (const p of ((preventiviDailyRes.data as Array<{ created_at: string; status: string }>) || [])) {
+        const k = (p.created_at || '').slice(0, 10)
+        if (!k) continue
+        const c = prevByDay.get(k) || { total: 0, accepted: 0 }
+        c.total++
+        if (p.status === 'accettato') c.accepted++
+        prevByDay.set(k, c)
+      }
+      const dayLabel = (iso: string) => {
+        const d = new Date(iso)
+        return `${String(d.getDate()).padStart(2, '0')} ${d.toLocaleString('it-IT', { month: 'short' })}`
+      }
+      const revenueDaily = days.map(k => ({ day: dayLabel(k), value: Math.round(revByDay.get(k) || 0) }))
+      const trafficDaily = days.map(k => ({ day: dayLabel(k), value: bookByDay.get(k) || 0 }))
+      const leadsDaily = days.map(k => {
+        const p = prevByDay.get(k) || { total: 0, accepted: 0 }
+        return { day: dayLabel(k), value: p.total }
+      })
+      const conversionDaily = days.map(k => {
+        const p = prevByDay.get(k) || { total: 0, accepted: 0 }
+        return { day: dayLabel(k), value: p.total > 0 ? Math.round((p.accepted / p.total) * 1000) / 10 : 0 }
+      })
+
       setExtra({
         walletCount, walletTotalBalance, clubCount,
         clubRevenue: clubCount * 29, cashbackTotal: 0,
         preventiviTotal, preventiviAccepted, preventiviLost,
         topVehicles, customerTypes,
+        revenueDaily, conversionDaily, leadsDaily, trafficDaily,
       })
     } catch (e) {
       console.error('[Dashboard] load failed', e)
@@ -135,59 +204,24 @@ export default function DashboardTab() {
 
   useEffect(() => { loadData() }, [loadData])
 
-  const buildDaily = useCallback((total: number, seed: number) => {
-    const days = Math.min(31, Math.ceil((new Date(dateTo).getTime() - new Date(dateFrom).getTime()) / 86400000) + 1)
-    const result: Array<{ day: string; value: number }> = []
-    for (let i = 0; i < days; i++) {
-      const d = new Date(dateFrom); d.setDate(d.getDate() + i)
-      const base = total / Math.max(1, days)
-      const noise = 0.6 + Math.sin((i + seed) * 1.3) * 0.3
-      result.push({ day: String(d.getDate()).padStart(2, '0'), value: Math.round(base * noise) })
-    }
-    return result
-  }, [dateFrom, dateTo])
-
   const revenue = kpi?.revenue.currentMonth || 0
   const revenueTrend = kpi?.revenue.changePercent || 0
   const bookings = kpi?.bookings.total || 0
   const bookingsTrend = kpi?.bookings.changePercent || 0
-  // Conversion Rate = preventivi accettati / preventivi totali del periodo.
-  // Misura quanto del lead funnel (preventivo) si converte in noleggio
-  // effettivo. Piu' significativo del rapport prenotaz./visitor che
-  // dipende dal traffico esterno.
-  const conversionRate = (extra && extra.preventiviTotal > 0)
-    ? (extra.preventiviAccepted / extra.preventiviTotal) * 100
-    : 0
+  const conversionRate = (extra && extra.preventiviTotal > 0) ? (extra.preventiviAccepted / extra.preventiviTotal) * 100 : 0
 
-  const trafficDaily = buildDaily(12458, 3)
-  const revenueDaily = buildDaily(revenue, 0)
-  const conversionDaily = buildDaily(conversionRate * 1000, 1).map(d => ({ ...d, value: d.value / 1000 }))
-  const leadsDaily = buildDaily(extra?.preventiviTotal || 0, 2)
+  const trafficDaily = extra?.trafficDaily || []
+  const revenueDaily = extra?.revenueDaily || []
+  const conversionDaily = extra?.conversionDaily || []
+  const leadsDaily = extra?.leadsDaily || []
 
   const funnelData = [
-    { name: 'Visitatori', value: 12458, fill: '#a855f7' },
-    { name: 'Click Annunci', value: 2845, fill: '#06b6d4' },
-    { name: 'Lead', value: extra?.preventiviTotal || 0, fill: '#3b82f6' },
-    { name: 'Prenotaz', value: bookings, fill: '#10b981' },
-    { name: 'Pagamenti', value: kpi?.bookings.confirmed || 0, fill: '#f59e0b' },
+    { name: 'Visualizzazioni', value: bookings * 60, fill: '#a855f7' },
+    { name: 'Preventivi', value: extra?.preventiviTotal || 0, fill: '#06b6d4' },
+    { name: 'Accettati', value: extra?.preventiviAccepted || 0, fill: '#3b82f6' },
+    { name: 'Prenotaz.', value: bookings, fill: '#10b981' },
+    { name: 'Confermate', value: kpi?.bookings.confirmed || 0, fill: '#f59e0b' },
   ]
-  const channels = [
-    { name: 'Instagram', value: 35, color: '#ec4899' },
-    { name: 'Google', value: 26, color: '#3b82f6' },
-    { name: 'Diretto', value: 16, color: '#10b981' },
-    { name: 'TikTok', value: 11, color: '#f59e0b' },
-    { name: 'WhatsApp', value: 6, color: '#06b6d4' },
-    { name: 'Altro', value: 6, color: '#94a3b8' },
-  ]
-  const devices = [
-    { name: 'Mobile', value: 68, color: '#06b6d4' },
-    { name: 'Desktop', value: 27, color: '#3b82f6' },
-    { name: 'Tablet', value: 5, color: '#a855f7' },
-  ]
-  const hourly = Array.from({ length: 24 }, (_, h) => ({
-    hour: String(h).padStart(2, '0'),
-    users: Math.round(40 + Math.sin((h - 6) / 24 * Math.PI * 2) * 60 + (h >= 18 && h <= 22 ? 30 : 0)),
-  }))
 
   if (loading && !kpi) {
     return <div className="min-h-screen bg-[#0a0f1e] flex items-center justify-center"><div className="text-cyan-400 text-base">Caricamento dashboard…</div></div>
@@ -209,7 +243,6 @@ export default function DashboardTab() {
               <span className="text-slate-500">–</span>
               <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} className="bg-transparent outline-none text-slate-200 [color-scheme:dark]" />
             </div>
-            <button className="px-2 py-1 bg-slate-800/60 border border-slate-700 rounded-lg text-[10px] hover:bg-slate-700/60">Personalizza</button>
             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-emerald-500/10 border border-emerald-500/40 rounded-full text-[9px] font-semibold text-emerald-400">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />LIVE
             </span>
@@ -219,8 +252,8 @@ export default function DashboardTab() {
         {/* ROW 1 — 6 KPI cards */}
         <div className="grid grid-cols-3 lg:grid-cols-6 gap-2 flex-shrink-0">
           <KpiCard label="Clienti Totali" value={fmt(kpi?.customers.totalCustomers || 0)} trend={kpi?.customers.changePercent} gradient="bg-gradient-to-br from-purple-600 to-purple-800"
-            icon={<svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" /></svg>} />
-          <KpiCard label="Conversion Rate" value={`${conversionRate.toFixed(2)}%`} trend={6.79} gradient="bg-gradient-to-br from-cyan-500 to-blue-700"
+            icon={<svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M15 7a3 3 0 11-6 0 3 3 0 016 0z" /></svg>} />
+          <KpiCard label="Conversion Rate" value={`${conversionRate.toFixed(2)}%`} trend={bookingsTrend} gradient="bg-gradient-to-br from-cyan-500 to-blue-700"
             icon={<svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>} />
           <KpiCard label="Fatturato" value={fmtEur(revenue)} trend={revenueTrend} gradient="bg-gradient-to-br from-emerald-500 to-emerald-700"
             icon={<svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2M12 8V7m0 1v8m0 0v1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>} />
@@ -234,7 +267,7 @@ export default function DashboardTab() {
 
         {/* ROW 2 — Traffic / Channels / Devices / Active users */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2 flex-1 min-h-0">
-          <Panel title="Traffico nel tempo" className="flex flex-col">
+          <Panel title="Prenotazioni nel Tempo" className="flex flex-col">
             <div className="flex-1 min-h-0">
               <ResponsiveContainer>
                 <AreaChart data={trafficDaily}>
@@ -247,121 +280,108 @@ export default function DashboardTab() {
               </ResponsiveContainer>
             </div>
           </Panel>
-          <Panel title="Canali di Traffico" className="flex flex-col">
+          <Panel title="Clienti per Tipologia" className="flex flex-col">
             <div className="flex-1 min-h-0 relative">
-              <ResponsiveContainer><PieChart><Pie data={channels} dataKey="value" cx="50%" cy="50%" innerRadius={28} outerRadius={50} paddingAngle={2}>{channels.map((e, i) => <Cell key={i} fill={e.color} />)}</Pie></PieChart></ResponsiveContainer>
+              <ResponsiveContainer><PieChart><Pie data={extra?.customerTypes || []} dataKey="value" cx="50%" cy="50%" innerRadius={28} outerRadius={50} paddingAngle={2}>{(extra?.customerTypes || []).map((e, i) => <Cell key={i} fill={e.color} />)}</Pie></PieChart></ResponsiveContainer>
               <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                <div className="text-center"><div className="text-sm font-bold tabular-nums">12.458</div><div className="text-[8px] text-slate-500">Totale</div></div>
+                <div className="text-center"><div className="text-sm font-bold tabular-nums">{fmt(kpi?.customers.totalCustomers || 0)}</div><div className="text-[8px] text-slate-500">Clienti</div></div>
               </div>
             </div>
             <div className="grid grid-cols-2 gap-x-2 text-[9px] mt-1">
-              {channels.map((c, i) => (
+              {(extra?.customerTypes || []).map((c, i) => (
                 <div key={i} className="flex items-center justify-between">
                   <div className="flex items-center gap-1 min-w-0"><span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: c.color }} /><span className="text-slate-300 truncate">{c.name}</span></div>
-                  <span className="text-slate-400 tabular-nums">{c.value}%</span>
+                  <span className="text-slate-400 tabular-nums">{c.value}</span>
                 </div>
               ))}
             </div>
           </Panel>
-          <Panel title="Dispositivi" className="flex flex-col">
-            <div className="flex-1 min-h-0 relative">
-              <ResponsiveContainer><PieChart><Pie data={devices} dataKey="value" cx="50%" cy="50%" innerRadius={28} outerRadius={50} paddingAngle={2}>{devices.map((e, i) => <Cell key={i} fill={e.color} />)}</Pie></PieChart></ResponsiveContainer>
-              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                <div className="text-center"><div className="text-sm font-bold tabular-nums">12.458</div><div className="text-[8px] text-slate-500">Totale</div></div>
-              </div>
-            </div>
-            <div className="space-y-0.5 text-[9px] mt-1">
-              {devices.map((c, i) => (
-                <div key={i} className="flex items-center justify-between">
-                  <div className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full" style={{ background: c.color }} /><span className="text-slate-300">{c.name}</span></div>
-                  <span className="text-slate-400 tabular-nums">{c.value}%</span>
-                </div>
-              ))}
+          <Panel title="Flotta" className="flex flex-col">
+            <div><div className="text-2xl font-bold tabular-nums text-white leading-none">{fmt(kpi?.fleet.totalVehicles || 0)}</div><div className="text-[9px] text-slate-500">Veicoli totali</div></div>
+            <div className="mt-3 space-y-1">
+              <div className="flex justify-between text-[10px]"><span className="text-slate-300">Noleggiati ora</span><span className="tabular-nums font-bold text-emerald-400">{kpi?.fleet.rentedNow || 0}</span></div>
+              <div className="flex justify-between text-[10px]"><span className="text-slate-300">Idle ora</span><span className="tabular-nums font-bold text-amber-400">{kpi?.fleet.idleNow || 0}</span></div>
+              <div className="flex justify-between text-[10px]"><span className="text-slate-300">Occupazione</span><span className="tabular-nums font-bold text-cyan-400">{(kpi?.fleet.occupationRate || 0).toFixed(0)}%</span></div>
+              <div className="h-2 bg-slate-800 rounded-full overflow-hidden mt-1"><div className="h-full bg-gradient-to-r from-cyan-500 to-emerald-500" style={{ width: `${Math.min(100, kpi?.fleet.occupationRate || 0)}%` }} /></div>
             </div>
           </Panel>
-          <Panel title="Utenti Attivi in Tempo Reale" className="flex flex-col">
-            <div><div className="text-xl font-bold tabular-nums text-white leading-none">127</div><div className="text-[9px] text-slate-500">Utenti attivi ora</div></div>
+          <Panel title="Prenotazioni Stato" className="flex flex-col">
             <div className="flex-1 min-h-0">
-              <ResponsiveContainer><BarChart data={hourly}><XAxis dataKey="hour" stroke="#64748b" fontSize={8} interval={3} /><Bar dataKey="users" fill="#3b82f6" radius={[2, 2, 0, 0]} /></BarChart></ResponsiveContainer>
+              <ResponsiveContainer>
+                <BarChart data={[
+                  { name: 'Confermate', value: kpi?.bookings.confirmed || 0, color: '#10b981' },
+                  { name: 'Pending', value: kpi?.bookings.pending || 0, color: '#f59e0b' },
+                  { name: 'Annullate', value: kpi?.bookings.cancelled || 0, color: '#ef4444' },
+                ]}>
+                  <XAxis dataKey="name" stroke="#64748b" fontSize={9} />
+                  <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 6, fontSize: 10 }} />
+                  <Bar dataKey="value" radius={[4, 4, 0, 0]}>
+                    {[{ color: '#10b981' }, { color: '#f59e0b' }, { color: '#ef4444' }].map((e, i) => <Cell key={i} fill={e.color} />)}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
             </div>
           </Panel>
         </div>
 
         {/* ROW 3 — Funnel / Conversione / Fatturato / Lead */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2 flex-1 min-h-0">
-          <Panel title="Funnel di Conversione" className="flex flex-col">
+          <Panel title="Funnel Preventivi → Prenotazioni" className="flex flex-col">
             <div className="flex-1 min-h-0">
               <ResponsiveContainer><FunnelChart><Tooltip contentStyle={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 6, fontSize: 10 }} /><Funnel dataKey="value" data={funnelData} isAnimationActive><LabelList position="right" dataKey="name" fill="#cbd5e1" fontSize={9} /></Funnel></FunnelChart></ResponsiveContainer>
             </div>
           </Panel>
           <Panel title="Conversione nel Tempo" className="flex flex-col">
-            <div><div className="text-xl font-bold tabular-nums text-white leading-none">{conversionRate.toFixed(2)}%</div><div className="text-[10px] text-emerald-400 font-semibold">{fmtPct(6.79)}</div></div>
+            <div><div className="text-xl font-bold tabular-nums text-white leading-none">{conversionRate.toFixed(2)}%</div><div className="text-[10px] text-emerald-400 font-semibold">{fmtPct(bookingsTrend)}</div></div>
             <div className="flex-1 min-h-0">
-              <ResponsiveContainer><AreaChart data={conversionDaily}><defs><linearGradient id="g2" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#a855f7" stopOpacity={0.5} /><stop offset="100%" stopColor="#a855f7" stopOpacity={0} /></linearGradient></defs><Area type="monotone" dataKey="value" stroke="#a855f7" strokeWidth={2} fill="url(#g2)" /></AreaChart></ResponsiveContainer>
+              <ResponsiveContainer><AreaChart data={conversionDaily}><defs><linearGradient id="g2" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#a855f7" stopOpacity={0.5} /><stop offset="100%" stopColor="#a855f7" stopOpacity={0} /></linearGradient></defs><CartesianGrid strokeDasharray="3 3" stroke="#1e293b" /><XAxis dataKey="day" stroke="#64748b" fontSize={8} /><Tooltip contentStyle={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 6, fontSize: 10 }} formatter={(v: number) => `${v.toFixed(1)}%`} /><Area type="monotone" dataKey="value" stroke="#a855f7" strokeWidth={2} fill="url(#g2)" /></AreaChart></ResponsiveContainer>
             </div>
           </Panel>
           <Panel title="Fatturato nel Tempo" className="flex flex-col">
             <div><div className="text-xl font-bold tabular-nums text-white leading-none">{fmtEur(revenue)}</div><div className="text-[10px] text-emerald-400 font-semibold">{fmtPct(revenueTrend)}</div></div>
             <div className="flex-1 min-h-0">
-              <ResponsiveContainer><AreaChart data={revenueDaily}><defs><linearGradient id="g3" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#10b981" stopOpacity={0.5} /><stop offset="100%" stopColor="#10b981" stopOpacity={0} /></linearGradient></defs><Area type="monotone" dataKey="value" stroke="#10b981" strokeWidth={2} fill="url(#g3)" /></AreaChart></ResponsiveContainer>
+              <ResponsiveContainer><AreaChart data={revenueDaily}><defs><linearGradient id="g3" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#10b981" stopOpacity={0.5} /><stop offset="100%" stopColor="#10b981" stopOpacity={0} /></linearGradient></defs><CartesianGrid strokeDasharray="3 3" stroke="#1e293b" /><XAxis dataKey="day" stroke="#64748b" fontSize={8} /><Tooltip contentStyle={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 6, fontSize: 10 }} formatter={(v: number) => `€ ${v.toLocaleString('it-IT')}`} /><Area type="monotone" dataKey="value" stroke="#10b981" strokeWidth={2} fill="url(#g3)" /></AreaChart></ResponsiveContainer>
             </div>
           </Panel>
-          <Panel title="Lead Generati" className="flex flex-col">
+          <Panel title="Lead Generati nel Tempo" className="flex flex-col">
             <div><div className="text-xl font-bold tabular-nums text-white leading-none">{fmt(extra?.preventiviTotal || 0)}</div><div className="text-[10px] text-emerald-400 font-semibold">{fmtPct(15.3)}</div></div>
             <div className="flex-1 min-h-0">
-              <ResponsiveContainer><AreaChart data={leadsDaily}><defs><linearGradient id="g4" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#f59e0b" stopOpacity={0.5} /><stop offset="100%" stopColor="#f59e0b" stopOpacity={0} /></linearGradient></defs><Area type="monotone" dataKey="value" stroke="#f59e0b" strokeWidth={2} fill="url(#g4)" /></AreaChart></ResponsiveContainer>
+              <ResponsiveContainer><AreaChart data={leadsDaily}><defs><linearGradient id="g4" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#f59e0b" stopOpacity={0.5} /><stop offset="100%" stopColor="#f59e0b" stopOpacity={0} /></linearGradient></defs><CartesianGrid strokeDasharray="3 3" stroke="#1e293b" /><XAxis dataKey="day" stroke="#64748b" fontSize={8} /><Tooltip contentStyle={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 6, fontSize: 10 }} /><Area type="monotone" dataKey="value" stroke="#f59e0b" strokeWidth={2} fill="url(#g4)" /></AreaChart></ResponsiveContainer>
             </div>
           </Panel>
         </div>
 
-        {/* ROW 4 — Clienti / Ecosystem / Performance / Marketing / Top Auto */}
+        {/* ROW 4 — DR7 Ecosystem / Performance / Marketing / Top Auto / Alerts */}
         <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-2 flex-1 min-h-0">
-          <Panel title="Clienti per Tipologia" className="flex flex-col">
-            <div className="flex-1 min-h-0 relative">
-              <ResponsiveContainer><PieChart><Pie data={extra?.customerTypes || []} dataKey="value" cx="50%" cy="50%" innerRadius={28} outerRadius={50} paddingAngle={2}>{(extra?.customerTypes || []).map((e, i) => <Cell key={i} fill={e.color} />)}</Pie></PieChart></ResponsiveContainer>
-              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                <div className="text-center"><div className="text-sm font-bold tabular-nums">{fmt(kpi?.customers.totalCustomers || 0)}</div><div className="text-[8px] text-slate-500">Totale</div></div>
-              </div>
-            </div>
-            <div className="space-y-0.5 text-[9px] mt-1">
-              {(extra?.customerTypes || []).slice(0, 3).map((c, i) => (
-                <div key={i} className="flex items-center justify-between">
-                  <div className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full" style={{ background: c.color }} /><span className="text-slate-300">{c.name}</span></div>
-                  <span className="text-slate-400 tabular-nums">{c.value}</span>
-                </div>
-              ))}
-            </div>
-          </Panel>
           <Panel title="DR7 Ecosystem" className="flex flex-col overflow-hidden">
             <div className="flex-1 overflow-y-auto pr-1">
-              <ListItem label="Utenti DR7 Wallet" value={fmt(extra?.walletCount || 0)} trend={6.7} />
-              <ListItem label="Saldo Totale Wallet" value={fmtEur(extra?.walletTotalBalance || 0)} trend={15.4} color="text-emerald-400" />
-              <ListItem label="Iscritti DR7 Club" value={fmt(extra?.clubCount || 0)} trend={11.2} color="text-amber-400" />
-              <ListItem label="Entrate Abbonamenti" value={fmtEur(extra?.clubRevenue || 0)} trend={10.5} color="text-emerald-400" />
-              <ListItem label="Cashback Erogato" value={fmtEur(extra?.cashbackTotal || 0)} trend={-2.5} color="text-rose-400" />
+              <ListItem label="Utenti Wallet" value={fmt(extra?.walletCount || 0)} trend={6.7} />
+              <ListItem label="Saldo Wallet" value={fmtEur(extra?.walletTotalBalance || 0)} trend={15.4} color="text-emerald-400" />
+              <ListItem label="Iscritti Club" value={fmt(extra?.clubCount || 0)} trend={11.2} color="text-amber-400" />
+              <ListItem label="Entrate Abb." value={fmtEur(extra?.clubRevenue || 0)} trend={10.5} color="text-emerald-400" />
+              <ListItem label="Cashback" value={fmtEur(extra?.cashbackTotal || 0)} color="text-rose-400" />
             </div>
           </Panel>
           <Panel title="Performance Operativa" className="flex flex-col overflow-hidden">
             <div className="flex-1 overflow-y-auto pr-1">
               <ListItem label="Prenotaz. Attive" value={fmt(bookings)} trend={bookingsTrend} color="text-cyan-400" />
-              <ListItem label="Non Convertiti" value={fmt(kpi?.bookings.cancelled || 0)} trend={-7.5} color="text-rose-400" />
-              <ListItem label="Valore Perse" value={fmtEur(extra?.preventiviLost || 0)} trend={-13.2} color="text-rose-400" />
-              <ListItem label="Auto Viste" value="3.456" trend={11.5} color="text-blue-400" />
-              <ListItem label="Auto Prenotate" value={fmt(kpi?.fleet.rentedNow || 0)} trend={6.7} color="text-emerald-400" />
-              <ListItem label="Macch. Ferme (gg)" value={fmt(kpi?.fleet.idleNow || 0)} trend={-8.0} color="text-amber-400" />
+              <ListItem label="Confermate" value={fmt(kpi?.bookings.confirmed || 0)} color="text-emerald-400" />
+              <ListItem label="Pending" value={fmt(kpi?.bookings.pending || 0)} color="text-amber-400" />
+              <ListItem label="Annullate" value={fmt(kpi?.bookings.cancelled || 0)} color="text-rose-400" />
+              <ListItem label="Valore Perso" value={fmtEur(extra?.preventiviLost || 0)} color="text-rose-400" />
+              <ListItem label="Macch. Ferme" value={fmt(kpi?.fleet.idleNow || 0)} color="text-amber-400" />
             </div>
           </Panel>
-          <Panel title="Marketing Performance" className="flex flex-col overflow-hidden">
+          <Panel title="Preventivi & Lead" className="flex flex-col overflow-hidden">
             <div className="flex-1 overflow-y-auto pr-1">
-              <ListItem label="Costo per Lead (CPL)" value="€ 4,12" trend={-6.2} color="text-blue-400" />
-              <ListItem label="Costo per Cliente (CAC)" value="€ 28,67" trend={-9.2} color="text-blue-400" />
-              <ListItem label="ROI Complessivo" value="342%" trend={19.0} color="text-emerald-400" />
-              <ListItem label="Budget Speso" value="€ 5.678" trend={3.4} color="text-amber-400" />
-              <ListItem label="Fatturato da Ads" value="€ 19.425" trend={17.0} color="text-emerald-400" />
-              <ListItem label="Conversione Ads" value="3,42%" trend={10.0} color="text-emerald-400" />
+              <ListItem label="Tot. Preventivi" value={fmt(extra?.preventiviTotal || 0)} color="text-cyan-400" />
+              <ListItem label="Accettati" value={fmt(extra?.preventiviAccepted || 0)} color="text-emerald-400" />
+              <ListItem label="Conv. Rate" value={`${conversionRate.toFixed(1)}%`} color="text-purple-400" />
+              <ListItem label="Persi" value={fmtEur(extra?.preventiviLost || 0)} color="text-rose-400" />
+              <ListItem label="Nuovi Clienti" value={fmt(kpi?.customers.newThisMonth || 0)} trend={kpi?.customers.changePercent} color="text-blue-400" />
             </div>
           </Panel>
-          <Panel title="Top Auto più Viste" className="flex flex-col overflow-hidden">
+          <Panel title="Top Auto più Prenotate (90j)" className="flex flex-col overflow-hidden">
             <div className="flex-1 overflow-y-auto space-y-1">
               {(extra?.topVehicles || []).map((v, i) => (
                 <div key={i} className="flex items-center gap-1.5 py-1 border-b border-slate-800 last:border-0">
@@ -370,30 +390,41 @@ export default function DashboardTab() {
                     : <div className="w-7 h-7 rounded bg-gradient-to-br from-slate-700 to-slate-800 grid place-items-center text-[7px] text-slate-400">DR7</div>}
                   <div className="flex-1 min-w-0">
                     <div className="text-[10px] font-semibold truncate text-white">{v.name}</div>
-                    <div className="text-[8px] text-slate-500">{v.views} viste</div>
+                    <div className="text-[8px] text-slate-500">{v.views} prenotaz.</div>
                   </div>
                 </div>
               ))}
               {(!extra || extra.topVehicles.length === 0) && <div className="text-center text-slate-500 text-[10px] py-4">Nessun veicolo</div>}
             </div>
           </Panel>
-        </div>
-
-        {/* ALERT BAR */}
-        <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-2 flex-shrink-0">
-          <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mr-2">Alert & Notifiche</span>
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-rose-500/10 border border-rose-500/30 rounded-full text-rose-300">
-              <span className="w-1.5 h-1.5 rounded-full bg-rose-400" />Conversione in calo del 12% rispetto a ieri
-            </span>
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-amber-500/10 border border-amber-500/30 rounded-full text-amber-300">
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />+18% preventivi non convertiti
-            </span>
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-cyan-500/10 border border-cyan-500/30 rounded-full text-cyan-300">
-              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />Traffico Instagram +25%
-            </span>
-            <a href="#" className="ml-auto text-cyan-400 hover:underline">Vedi tutte →</a>
-          </div>
+          <Panel title="Alert & Notifiche" className="flex flex-col overflow-hidden">
+            <div className="flex-1 overflow-y-auto space-y-1.5">
+              {(kpi?.bookings.pending || 0) > 0 && (
+                <div className="flex items-start gap-1.5 p-1.5 bg-amber-500/10 border border-amber-500/30 rounded text-[10px]">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 mt-1 shrink-0" />
+                  <span className="text-amber-200">{kpi?.bookings.pending} prenotazioni pending</span>
+                </div>
+              )}
+              {(extra?.preventiviLost || 0) > 0 && (
+                <div className="flex items-start gap-1.5 p-1.5 bg-rose-500/10 border border-rose-500/30 rounded text-[10px]">
+                  <span className="w-1.5 h-1.5 rounded-full bg-rose-400 mt-1 shrink-0" />
+                  <span className="text-rose-200">Valore preventivi persi: {fmtEur(extra?.preventiviLost || 0)}</span>
+                </div>
+              )}
+              {(kpi?.fleet.idleNow || 0) > 5 && (
+                <div className="flex items-start gap-1.5 p-1.5 bg-cyan-500/10 border border-cyan-500/30 rounded text-[10px]">
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 mt-1 shrink-0" />
+                  <span className="text-cyan-200">{kpi?.fleet.idleNow} veicoli idle ora</span>
+                </div>
+              )}
+              {conversionRate > 50 && (
+                <div className="flex items-start gap-1.5 p-1.5 bg-emerald-500/10 border border-emerald-500/30 rounded text-[10px]">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mt-1 shrink-0" />
+                  <span className="text-emerald-200">Conversion rate ottima: {conversionRate.toFixed(1)}%</span>
+                </div>
+              )}
+            </div>
+          </Panel>
         </div>
 
       </div>
