@@ -120,10 +120,18 @@ export default function DashboardTab() {
   const loadData = useCallback(async () => {
     setLoading(true)
     try {
-      const [kpiRes, walletsRes, clubRes, prevRes, prevAccRes, vehiclesRes, custTypesRes, bookingsDailyRes, preventiviDailyRes, bookingsByVehicleRes] = await Promise.all([
+      const [kpiRes, walletsRes, creditBalRes, clubRes, cashbackRes, prevRes, prevAccRes, vehiclesRes, custTypesRes, bookingsDailyRes, preventiviDailyRes, bookingsByVehicleRes] = await Promise.all([
         authFetch(`/.netlify/functions/dashboard-kpi?from=${dateFrom}&to=${dateTo}`),
-        supabase.from('wallets').select('balance', { count: 'exact' }).gt('balance', 0),
+        // Referral wallets: colonna `balance_cents` (NON `balance`). Prima
+        // selezionavamo una colonna inesistente -> sempre 0.
+        supabase.from('wallets').select('balance_cents', { count: 'exact' }).gt('balance_cents', 0),
+        // Wallet del sito (user_credit_balance, in euro, non cents).
+        supabase.from('user_credit_balance').select('balance', { count: 'exact' }).gt('balance', 0),
         supabase.from('customer_memberships').select('id', { count: 'exact' }).eq('status', 'active'),
+        // Cashback DR7 Club: somma transazioni con reference_type='card_bonus'.
+        // Le righe vengono inserite da nexi-payment-callback al momento del
+        // pagamento carta di un cliente Club attivo.
+        supabase.from('credit_transactions').select('amount').eq('reference_type', 'card_bonus'),
         supabase.from('preventivi').select('total_final, status', { count: 'exact' }).gte('created_at', dateFrom).lte('created_at', dateTo + 'T23:59:59'),
         supabase.from('preventivi').select('id', { count: 'exact' }).eq('status', 'accettato').gte('created_at', dateFrom).lte('created_at', dateTo + 'T23:59:59'),
         supabase.from('vehicles').select('id, display_name, metadata').neq('status', 'retired').limit(50),
@@ -141,18 +149,32 @@ export default function DashboardTab() {
           .not('vehicle_id', 'is', null),
       ])
       if (kpiRes.ok) setKpi(await kpiRes.json())
-      const walletCount = (walletsRes as { count?: number | null }).count || 0
-      const walletTotalBalance = ((walletsRes.data as Array<{ balance: number }>) || []).reduce((s, w) => s + Number(w.balance || 0), 0)
+      // Utenti Wallet = referral wallets con balance > 0 + user_credit_balance > 0
+      const referralWalletCount = (walletsRes as { count?: number | null }).count || 0
+      const siteWalletCount = (creditBalRes as { count?: number | null }).count || 0
+      const walletCount = referralWalletCount + siteWalletCount
+      // Saldo Wallet = sum di balance_cents/100 (referral) + balance (sito)
+      const referralWalletEur = ((walletsRes.data as Array<{ balance_cents: number }>) || [])
+        .reduce((s, w) => s + (Number(w.balance_cents || 0) / 100), 0)
+      const siteWalletEur = ((creditBalRes.data as Array<{ balance: number }>) || [])
+        .reduce((s, w) => s + Number(w.balance || 0), 0)
+      const walletTotalBalance = referralWalletEur + siteWalletEur
       const clubCount = (clubRes as { count?: number | null }).count || 0
+      const cashbackTotal = ((cashbackRes.data as Array<{ amount: number }>) || [])
+        .reduce((s, r) => s + Number(r.amount || 0), 0)
       const preventiviTotal = (prevRes as { count?: number | null }).count || 0
       const preventiviAccepted = (prevAccRes as { count?: number | null }).count || 0
       const preventiviLost = ((prevRes.data as Array<{ status: string; total_final: number }>) || [])
         .filter(p => p.status === 'rifiutato' || p.status === 'scaduto')
         .reduce((s, p) => s + Number(p.total_final || 0), 0)
 
-      // Top Vehicles by real booking count (90j)
+      // Top Vehicles by real booking count (90j). Escludi i veicoli test
+      // (TEST000/TEST002 e qualunque vehicle_name che contiene "Test"):
+      // non e' onesto vederli nella classifica del boss.
+      const isTestRow = (name: string) => /\btest\b/i.test(name || '')
       const countByVeh = new Map<string, { name: string; count: number }>()
       for (const b of ((bookingsByVehicleRes.data as Array<{ vehicle_id: string; vehicle_name: string }>) || [])) {
+        if (isTestRow(b.vehicle_name)) continue
         const c = countByVeh.get(b.vehicle_id)
         if (c) c.count++
         else countByVeh.set(b.vehicle_id, { name: b.vehicle_name || 'Veicolo', count: 1 })
@@ -224,7 +246,9 @@ export default function DashboardTab() {
 
       setExtra({
         walletCount, walletTotalBalance, clubCount,
-        clubRevenue: clubCount * 29, cashbackTotal: 0,
+        // DR7 Club: €39/anno (rule da memory, NON €29).
+        clubRevenue: clubCount * 39,
+        cashbackTotal,
         preventiviTotal, preventiviAccepted, preventiviLost,
         topVehicles, customerTypes,
         revenueDaily, conversionDaily, leadsDaily, trafficDaily,
@@ -285,17 +309,17 @@ export default function DashboardTab() {
 
         {/* ROW 1 — 6 KPI cards with sparkline */}
         <div className="grid grid-cols-3 lg:grid-cols-6 gap-2 flex-shrink-0">
-          <KpiCard label="Visitatori" value={fmt(kpi?.customers.totalCustomers || 0)} trend={kpi?.customers.changePercent ?? undefined} color="purple" sparkline={trafficDaily}
+          <KpiCard label="Clienti" value={fmt(kpi?.customers.totalCustomers || 0)} trend={kpi?.customers.changePercent ?? undefined} color="purple" sparkline={trafficDaily}
             icon={<svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M15 7a3 3 0 11-6 0 3 3 0 016 0z" /></svg>} />
           <KpiCard label="Conversion Rate" value={`${conversionRate.toFixed(2)}%`} trend={bookingsTrend} color="emerald" sparkline={conversionDaily}
             icon={<svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" /></svg>} />
           <KpiCard label="Fatturato" value={fmtEur(revenue)} trend={revenueTrend} color="cyan" sparkline={revenueDaily}
             icon={<svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2M12 8V7m0 1v8m0 0v1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>} />
-          <KpiCard label="Lead Generati" value={fmt(extra?.preventiviTotal || 0)} trend={15.3} color="amber" sparkline={leadsDaily}
+          <KpiCard label="Lead Generati" value={fmt(extra?.preventiviTotal || 0)} color="amber" sparkline={leadsDaily}
             icon={<svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M9 12l2 2 4-4M12 2a10 10 0 100 20 10 10 0 000-20z" /></svg>} />
-          <KpiCard label="Utenti Wallet" value={fmt(extra?.walletCount || 0)} trend={6.7} color="blue" sparkline={revenueDaily.map(d => ({ value: Math.max(1, d.value / 50) }))}
+          <KpiCard label="Utenti Wallet" value={fmt(extra?.walletCount || 0)} color="blue" sparkline={revenueDaily.map(d => ({ value: Math.max(1, d.value / 50) }))}
             icon={<svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" /></svg>} />
-          <KpiCard label="Member DR7 Club" value={fmt(extra?.clubCount || 0)} trend={11.2} color="rose" sparkline={trafficDaily.map(d => ({ value: Math.max(1, d.value / 5) }))}
+          <KpiCard label="Member DR7 Club" value={fmt(extra?.clubCount || 0)} color="rose" sparkline={trafficDaily.map(d => ({ value: Math.max(1, d.value / 5) }))}
             icon={<svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}><path d="M11 3l2 5h5l-4 3 2 6-5-4-5 4 2-6-4-3h5l2-5z" /></svg>} />
         </div>
 
@@ -378,7 +402,7 @@ export default function DashboardTab() {
             </div>
           </Panel>
           <Panel title="Lead Generati nel Tempo" className="flex flex-col">
-            <div><div className="text-xl font-bold tabular-nums text-white leading-none">{fmt(extra?.preventiviTotal || 0)}</div><div className="text-[10px] text-emerald-400 font-semibold">{fmtPct(15.3)}</div></div>
+            <div><div className="text-xl font-bold tabular-nums text-white leading-none">{fmt(extra?.preventiviTotal || 0)}</div><div className="text-[10px] text-slate-500">preventivi nel periodo</div></div>
             <div className="flex-1 min-h-0">
               <ResponsiveContainer><AreaChart data={leadsDaily}><defs><linearGradient id="g4" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#f59e0b" stopOpacity={0.5} /><stop offset="100%" stopColor="#f59e0b" stopOpacity={0} /></linearGradient></defs><CartesianGrid strokeDasharray="3 3" stroke="#1e293b" /><XAxis dataKey="day" stroke="#64748b" fontSize={8} /><Tooltip contentStyle={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 6, fontSize: 10 }} /><Area type="monotone" dataKey="value" stroke="#f59e0b" strokeWidth={2} fill="url(#g4)" /></AreaChart></ResponsiveContainer>
             </div>
@@ -389,10 +413,10 @@ export default function DashboardTab() {
         <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-2 flex-1 min-h-0">
           <Panel title="DR7 Ecosystem" className="flex flex-col overflow-hidden">
             <div className="flex-1 overflow-y-auto pr-1">
-              <ListItem label="Utenti Wallet" value={fmt(extra?.walletCount || 0)} trend={6.7} />
-              <ListItem label="Saldo Wallet" value={fmtEur(extra?.walletTotalBalance || 0)} trend={15.4} color="text-emerald-400" />
-              <ListItem label="Iscritti Club" value={fmt(extra?.clubCount || 0)} trend={11.2} color="text-amber-400" />
-              <ListItem label="Entrate Abb." value={fmtEur(extra?.clubRevenue || 0)} trend={10.5} color="text-emerald-400" />
+              <ListItem label="Utenti Wallet" value={fmt(extra?.walletCount || 0)} />
+              <ListItem label="Saldo Wallet" value={fmtEur(extra?.walletTotalBalance || 0)} color="text-emerald-400" />
+              <ListItem label="Iscritti Club" value={fmt(extra?.clubCount || 0)} color="text-amber-400" />
+              <ListItem label="Entrate Abb." value={fmtEur(extra?.clubRevenue || 0)} color="text-emerald-400" />
               <ListItem label="Cashback" value={fmtEur(extra?.cashbackTotal || 0)} color="text-rose-400" />
             </div>
           </Panel>
