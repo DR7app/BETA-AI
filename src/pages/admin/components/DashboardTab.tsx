@@ -120,18 +120,13 @@ export default function DashboardTab() {
   const loadData = useCallback(async () => {
     setLoading(true)
     try {
-      const [kpiRes, walletsRes, creditBalRes, clubRes, cashbackRes, prevRes, prevAccRes, vehiclesRes, custTypesRes, bookingsDailyRes, preventiviDailyRes, bookingsByVehicleRes] = await Promise.all([
+      const [kpiRes, ecosystemRes, prevRes, prevAccRes, vehiclesRes, custTypesRes, bookingsDailyRes, preventiviDailyRes, bookingsByVehicleRes] = await Promise.all([
         authFetch(`/.netlify/functions/dashboard-kpi?from=${dateFrom}&to=${dateTo}`),
-        // Referral wallets: colonna `balance_cents` (NON `balance`). Prima
-        // selezionavamo una colonna inesistente -> sempre 0.
-        supabase.from('wallets').select('balance_cents', { count: 'exact' }).gt('balance_cents', 0),
-        // Wallet del sito (user_credit_balance, in euro, non cents).
-        supabase.from('user_credit_balance').select('balance', { count: 'exact' }).gt('balance', 0),
-        supabase.from('customer_memberships').select('id', { count: 'exact' }).eq('status', 'active'),
-        // Cashback DR7 Club: somma transazioni con reference_type='card_bonus'.
-        // Le righe vengono inserite da nexi-payment-callback al momento del
-        // pagamento carta di un cliente Club attivo.
-        supabase.from('credit_transactions').select('amount').eq('reference_type', 'card_bonus'),
+        // DR7 Ecosystem (wallet/club/cashback) via service role -> bypassa
+        // RLS che dal browser bloccava queste tabelle e mostrava 0.
+        // Niente piu' valori hardcoded: revenue Club da campo amount-like
+        // reale su customer_memberships.
+        authFetch('/.netlify/functions/dashboard-ecosystem-stats'),
         supabase.from('preventivi').select('total_final, status', { count: 'exact' }).gte('created_at', dateFrom).lte('created_at', dateTo + 'T23:59:59'),
         supabase.from('preventivi').select('id', { count: 'exact' }).eq('status', 'accettato').gte('created_at', dateFrom).lte('created_at', dateTo + 'T23:59:59'),
         supabase.from('vehicles').select('id, display_name, metadata').neq('status', 'retired').limit(50),
@@ -149,19 +144,14 @@ export default function DashboardTab() {
           .not('vehicle_id', 'is', null),
       ])
       if (kpiRes.ok) setKpi(await kpiRes.json())
-      // Utenti Wallet = referral wallets con balance > 0 + user_credit_balance > 0
-      const referralWalletCount = (walletsRes as { count?: number | null }).count || 0
-      const siteWalletCount = (creditBalRes as { count?: number | null }).count || 0
-      const walletCount = referralWalletCount + siteWalletCount
-      // Saldo Wallet = sum di balance_cents/100 (referral) + balance (sito)
-      const referralWalletEur = ((walletsRes.data as Array<{ balance_cents: number }>) || [])
-        .reduce((s, w) => s + (Number(w.balance_cents || 0) / 100), 0)
-      const siteWalletEur = ((creditBalRes.data as Array<{ balance: number }>) || [])
-        .reduce((s, w) => s + Number(w.balance || 0), 0)
-      const walletTotalBalance = referralWalletEur + siteWalletEur
-      const clubCount = (clubRes as { count?: number | null }).count || 0
-      const cashbackTotal = ((cashbackRes.data as Array<{ amount: number }>) || [])
-        .reduce((s, r) => s + Number(r.amount || 0), 0)
+      const eco = ecosystemRes.ok ? await ecosystemRes.json() : {
+        walletCount: 0, walletTotalBalance: 0, clubCount: 0, clubRevenue: 0, cashbackTotal: 0,
+      }
+      const walletCount = Number(eco.walletCount) || 0
+      const walletTotalBalance = Number(eco.walletTotalBalance) || 0
+      const clubCount = Number(eco.clubCount) || 0
+      const cashbackTotal = Number(eco.cashbackTotal) || 0
+      const clubRevenueFromDb = Number(eco.clubRevenue) || 0
       const preventiviTotal = (prevRes as { count?: number | null }).count || 0
       const preventiviAccepted = (prevAccRes as { count?: number | null }).count || 0
       const preventiviLost = ((prevRes.data as Array<{ status: string; total_final: number }>) || [])
@@ -246,8 +236,10 @@ export default function DashboardTab() {
 
       setExtra({
         walletCount, walletTotalBalance, clubCount,
-        // DR7 Club: €39/anno (rule da memory, NON €29).
-        clubRevenue: clubCount * 39,
+        // Revenue Club = somma reale di un campo amount-like in
+        // customer_memberships (vedi dashboard-ecosystem-stats). Niente
+        // moltiplicazione hardcoded per prezzo annuale.
+        clubRevenue: clubRevenueFromDb,
         cashbackTotal,
         preventiviTotal, preventiviAccepted, preventiviLost,
         topVehicles, customerTypes,
@@ -282,11 +274,15 @@ export default function DashboardTab() {
   ]
 
   if (loading && !kpi) {
-    return <div className="min-h-screen bg-[#0a0f1e] flex items-center justify-center"><div className="text-cyan-400 text-base">Caricamento dashboard…</div></div>
+    return <div className="h-[calc(100vh-3rem)] bg-[#0a0f1e] flex items-center justify-center"><div className="text-cyan-400 text-base">Caricamento dashboard…</div></div>
   }
 
   return (
-    <div className="h-screen bg-[#0a0f1e] text-white overflow-hidden">
+    // h-[calc(100vh-3rem)] = viewport meno la topbar admin (~48px) — cosi'
+    // la dashboard riempie esattamente lo spazio disponibile senza
+    // generare scroll della pagina. Tutti i pannelli usano flex-1
+    // min-h-0 per redistribuirsi nell'altezza disponibile.
+    <div className="h-[calc(100vh-3rem)] bg-[#0a0f1e] text-white overflow-hidden">
       <div className="h-full flex flex-col px-3 py-3 gap-2 max-w-[1920px] mx-auto">
 
         {/* HEADER */}
