@@ -148,12 +148,12 @@ interface VirtualOperator { id: string; name: string; role: string; initials: st
 // nomi che non esistono. Avatar = "PW" su ogni lane, accenti colorati per
 // distinguerle.
 const VIRTUAL_OPERATORS: VirtualOperator[] = [
-  { id: 'pw-pista-a-1', name: 'Prime Wash', role: 'Pista A',     initials: 'PW', accent: '#22d3ee' },
-  { id: 'pw-pista-a-2', name: 'Prime Wash', role: 'Pista A',     initials: 'PW', accent: '#a78bfa' },
-  { id: 'pw-pista-b',   name: 'Prime Wash', role: 'Pista B',     initials: 'PW', accent: '#34d399' },
-  { id: 'pw-pista-a-3', name: 'Prime Wash', role: 'Pista A',     initials: 'PW', accent: '#f97316' },
-  { id: 'pw-det',       name: 'Prime Wash', role: 'Detailing',   initials: 'PW', accent: '#facc15' },
-  { id: 'pw-premium',   name: 'Prime Wash', role: 'Box Premium', initials: 'PW', accent: '#f43f5e' },
+  { id: 'pw-1', name: 'Prime Wash', role: '', initials: 'PW', accent: '#22d3ee' },
+  { id: 'pw-2', name: 'Prime Wash', role: '', initials: 'PW', accent: '#a78bfa' },
+  { id: 'pw-3', name: 'Prime Wash', role: '', initials: 'PW', accent: '#34d399' },
+  { id: 'pw-4', name: 'Prime Wash', role: '', initials: 'PW', accent: '#f97316' },
+  { id: 'pw-5', name: 'Prime Wash', role: '', initials: 'PW', accent: '#facc15' },
+  { id: 'pw-6', name: 'Prime Wash', role: '', initials: 'PW', accent: '#f43f5e' },
 ]
 function hashOperatorIndex(bookingId: string, n: number): number {
   let h = 0
@@ -1806,7 +1806,7 @@ function OperatoriPanel({
               </div>
               <div className="min-w-0 leading-tight">
                 <div className="text-[12px] font-semibold text-theme-text-primary truncate">{op.name}</div>
-                <div className="text-[9.5px] uppercase tracking-wider text-theme-text-muted">{op.role}</div>
+                {op.role && <div className="text-[9.5px] uppercase tracking-wider text-theme-text-muted">{op.role}</div>}
               </div>
             </div>
           ))}
