@@ -135,32 +135,6 @@ const formatDuration = (minutes: number): string => {
   return `${hours}h ${mins}min`
 }
 
-// Operatori virtuali per la vista "Operatori".
-// IMPORTANTE: il backend non ha operator_id su carwash_bookings. L'unico
-// operatore reale e' "Prime Wash"; gli altri sono lane decorative del
-// mockup. L'assegnazione booking->lane e' deterministica (hash booking.id)
-// quindi e' stabile fra refresh. Rimuovere quando esistera' un campo
-// operator_id reale e mostrare solo "Prime Wash" come singola lane.
-interface VirtualOperator { id: string; name: string; role: string; initials: string; accent: string }
-// L'utente ha un solo operatore reale (Prime Wash). Mostro 6 lane tutte
-// etichettate "Prime Wash" con ruoli/sedi diversi (Pista A, Pista B, Det.,
-// Box Premium) per mantenere la densita' visuale del design senza inventare
-// nomi che non esistono. Avatar = "PW" su ogni lane, accenti colorati per
-// distinguerle.
-const VIRTUAL_OPERATORS: VirtualOperator[] = [
-  { id: 'pw-1', name: 'Prime Wash', role: '', initials: 'PW', accent: '#22d3ee' },
-  { id: 'pw-2', name: 'Prime Wash', role: '', initials: 'PW', accent: '#a78bfa' },
-  { id: 'pw-3', name: 'Prime Wash', role: '', initials: 'PW', accent: '#34d399' },
-  { id: 'pw-4', name: 'Prime Wash', role: '', initials: 'PW', accent: '#f97316' },
-  { id: 'pw-5', name: 'Prime Wash', role: '', initials: 'PW', accent: '#facc15' },
-  { id: 'pw-6', name: 'Prime Wash', role: '', initials: 'PW', accent: '#f43f5e' },
-]
-function hashOperatorIndex(bookingId: string, n: number): number {
-  let h = 0
-  for (let i = 0; i < bookingId.length; i++) h = (h * 31 + bookingId.charCodeAt(i)) | 0
-  return Math.abs(h) % n
-}
-
 interface CarWashCalendarTabProps {
   onNewBooking?: (date: string, time: string) => void
 }
@@ -273,7 +247,7 @@ export default function CarWashCalendarTab({ onNewBooking }: CarWashCalendarTabP
   // View mode: Mese (default = existing month grid), Settimana (7-day window),
   // Giorno (single-day chronological timeline). NO Operatori tab — left out
   // by explicit request.
-  const [viewMode, setViewMode] = useState<'mese' | 'settimana' | 'giorno' | 'operatori'>('operatori')
+  const [viewMode, setViewMode] = useState<'mese' | 'settimana' | 'giorno'>('mese')
   // For Giorno/Settimana, anchor date is `currentDate`. "Oggi" button below
   // resets `currentDate` to today.
 
@@ -576,17 +550,53 @@ export default function CarWashCalendarTab({ onNewBooking }: CarWashCalendarTabP
     return grouped
   }, [filteredEvents])
 
-  // Assign lanes to prevent overlaps within each day
+  // Lane assignment with proper overlap detection. Per giorno, sort by
+  // appointment time; per ciascun evento trova la lane piu' bassa che
+  // non ha collisioni di tempo, e calcola maxLanesInGroup (per gli eventi
+  // che si sovrappongono) cosi' la larghezza renderizzata sa quanti box
+  // affiancare. Risultato: due booking allo stesso slot vengono mostrati
+  // side-by-side invece che uno sopra l'altro.
   const eventsWithLanes = useMemo(() => {
-    return filteredEvents.map(evt => {
-      const dayEvents = eventsByDay.get(evt.day) || []
-      const evtIndex = dayEvents.indexOf(evt)
-      return {
-        ...evt,
-        laneIndex: evtIndex
+    type Ranged = (typeof filteredEvents)[number] & { startMin: number; endMin: number; laneIndex: number; groupLanes: number }
+    const result: Ranged[] = []
+    for (const [, dayEvents] of eventsByDay) {
+      const ranged = dayEvents.map(evt => {
+        const [h, m] = (evt.booking.appointment_time || '09:00').split(':').map(Number)
+        const startMin = (h || 0) * 60 + (m || 0)
+        const endMin = startMin + evt.duration
+        return { ...evt, startMin, endMin, laneIndex: 0, groupLanes: 1 } as Ranged
+      })
+      ranged.sort((a, b) => a.startMin - b.startMin || b.endMin - a.endMin)
+
+      // Sweep: assign each booking the smallest free lane.
+      const laneEnds: number[] = []   // laneEnds[i] = endMin del booking corrente in quella lane
+      for (const e of ranged) {
+        let assigned = -1
+        for (let i = 0; i < laneEnds.length; i++) {
+          if (laneEnds[i] <= e.startMin) { assigned = i; break }
+        }
+        if (assigned === -1) { assigned = laneEnds.length; laneEnds.push(e.endMin) }
+        else laneEnds[assigned] = e.endMin
+        e.laneIndex = assigned
       }
-    })
-  }, [filteredEvents, eventsByDay])
+
+      // Group overlap propagation: per ogni evento, conta quante lane
+      // sono in uso DURANTE il suo intervallo. Cosi' un evento solo non
+      // viene ristretto per "colpa" di un altro evento lontano nello
+      // stesso giorno.
+      for (const e of ranged) {
+        let maxLane = 0
+        for (const other of ranged) {
+          if (other.startMin < e.endMin && other.endMin > e.startMin) {
+            if (other.laneIndex > maxLane) maxLane = other.laneIndex
+          }
+        }
+        e.groupLanes = maxLane + 1
+      }
+      result.push(...ranged)
+    }
+    return result
+  }, [eventsByDay])
 
 
 
@@ -721,7 +731,7 @@ export default function CarWashCalendarTab({ onNewBooking }: CarWashCalendarTabP
       {/* View tabs + date display + Oggi button — dark pill row, cyan accent. */}
       <div className="relative z-10 flex flex-wrap items-center gap-3 px-3 sm:px-4 py-2.5 border-b border-theme-border bg-theme-bg-secondary dark:bg-black/20 backdrop-blur-md">
         <div className="flex items-center gap-2 bg-theme-bg-primary/30 rounded-full p-1 border border-theme-border/40">
-          {(['giorno', 'settimana', 'mese', 'operatori'] as const).map(v => (
+          {(['giorno', 'settimana', 'mese'] as const).map(v => (
             <button
               key={v}
               onClick={() => setViewMode(v)}
@@ -747,7 +757,6 @@ export default function CarWashCalendarTab({ onNewBooking }: CarWashCalendarTabP
             return `Settimana del ${f(start)} – ${f(end)}`
           })()}
           {viewMode === 'mese' && currentDate.toLocaleDateString('it-IT', { month: 'long', year: 'numeric' })}
-          {viewMode === 'operatori' && currentDate.toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -879,15 +888,6 @@ export default function CarWashCalendarTab({ onNewBooking }: CarWashCalendarTabP
       {/* 2. Main area: calendar grid + (lg only) right sidebar */}
       <div className="flex-1 flex overflow-hidden">
 
-      {viewMode === 'operatori' ? (
-        <OperatoriPanel
-          bookings={bookings}
-          currentDate={currentDate}
-          searchQuery={searchQuery}
-          onSelectBooking={setSelectedBooking}
-        />
-      ) : (
-      <>
       {/* 2A. Scrollable Calendar Area */}
       <div className="relative z-10 flex-1 overflow-auto flex flex-col w-full bg-theme-bg-primary dark:bg-[linear-gradient(180deg,#0a0d14_0%,#070a10_100%)]">
 
@@ -1039,13 +1039,25 @@ export default function CarWashCalendarTab({ onNewBooking }: CarWashCalendarTabP
                                 ? 'bg-gradient-to-br from-amber-400 to-amber-600 dark:from-amber-500 dark:to-amber-700 border-amber-300/50 dark:border-amber-300/40 shadow-amber-500/20 dark:shadow-amber-900/30'
                                 : 'bg-gradient-to-br from-red-500 to-red-700 dark:from-red-700 dark:to-red-900 border-red-400/50 dark:border-red-500/40 shadow-red-500/20 dark:shadow-red-900/30'
 
+                          // Horizontal lane positioning when 2+ bookings overlap in time.
+                          // groupLanes = quanti box affiancare nello stesso intervallo;
+                          // laneIndex = quale colonna occupa questo box.
+                          const lanes = (startEvt as { groupLanes?: number }).groupLanes || 1
+                          const lane = (startEvt as { laneIndex?: number }).laneIndex || 0
+                          const widthPct = 100 / lanes
+                          const leftPct = lane * widthPct
+                          // Padding orizzontale dei box per non appiccicarli ai bordi della cella
+                          const xPad = lanes > 1 ? 1.5 : 1   // px per lato
+
                           return (
                           <div
                             key={startEvt.booking.id}
-                            className={`absolute inset-x-0 ${bgColor} border border-white/10 rounded-lg shadow-[0_4px_12px_-4px_rgba(0,0,0,0.5)] hover:shadow-[0_8px_24px_-6px_rgba(34,211,238,0.45)] hover:-translate-y-0.5 hover:brightness-110 transition-all duration-200 cursor-pointer ${hasClientOverlap ? 'z-[25]' : 'z-20'} overflow-hidden group/booking ring-0 hover:ring-1 hover:ring-cyan-300/40`}
+                            className={`absolute ${bgColor} border border-white/10 rounded-lg shadow-[0_4px_12px_-4px_rgba(0,0,0,0.5)] hover:shadow-[0_8px_24px_-6px_rgba(34,211,238,0.45)] hover:-translate-y-0.5 hover:brightness-110 transition-all duration-200 cursor-pointer ${hasClientOverlap ? 'z-[25]' : 'z-20'} overflow-hidden group/booking ring-0 hover:ring-1 hover:ring-cyan-300/40`}
                             style={{
                               height: `${(startEvt.duration / 5) * CELL_HEIGHT - 2}px`,
                               top: `${topOffset}px`,
+                              left: `calc(${leftPct}% + ${xPad}px)`,
+                              width: `calc(${widthPct}% - ${xPad * 2}px)`,
                               ...(bookingHasNotes ? { boxShadow: 'inset 0 0 0 2.5px #FACC15', borderColor: '#FACC15' } : {})
                             }}
                             onClick={(e) => {
@@ -1162,8 +1174,6 @@ export default function CarWashCalendarTab({ onNewBooking }: CarWashCalendarTabP
         </div>
 
       </div>
-      </>
-      )}
 
       {/* 2B. Right sidebar — telemetry intelligence panel. */}
       <aside className="relative z-10 hidden lg:flex flex-col w-72 shrink-0 border-l border-theme-border bg-theme-bg-secondary dark:bg-black/30 backdrop-blur-md p-4 gap-4 overflow-auto">
@@ -1223,51 +1233,6 @@ export default function CarWashCalendarTab({ onNewBooking }: CarWashCalendarTabP
             <li className="flex items-center gap-2"><span className="w-3 h-3 rounded-sm border-2 border-amber-300" /><span className="text-theme-text-primary">Con note</span></li>
             <li className="flex items-center gap-2"><span className="w-3 h-3 rounded-sm bg-[#22d3ee]" /><span className="text-theme-text-primary">Oggi</span></li>
           </ul>
-        </div>
-
-        {/* Carico Operatori — distribuzione hash-based (visuale).
-            Stessa logica usata da OperatoriPanel: deterministico per id booking. */}
-        <div>
-          <h4 className="text-[10px] uppercase tracking-wider text-theme-text-muted font-semibold mb-2">Carico Operatori</h4>
-          <div className="space-y-1.5">
-            {(() => {
-              const todayBookings = bookings.filter(b => {
-                if (isRientroBooking(b)) return false
-                const bd = new Date(b.appointment_date)
-                return bd.getFullYear() === currentDate.getFullYear()
-                  && bd.getMonth() === currentDate.getMonth()
-                  && bd.getDate() === currentDate.getDate()
-              })
-              const counts = VIRTUAL_OPERATORS.map(() => 0)
-              todayBookings.forEach(b => {
-                counts[hashOperatorIndex(b.id, VIRTUAL_OPERATORS.length)]++
-              })
-              const maxCount = Math.max(1, ...counts)
-              return VIRTUAL_OPERATORS.map((op, i) => {
-                const c = counts[i]
-                const pct = Math.round((c / maxCount) * 100)
-                return (
-                  <div key={op.id} className="flex items-center gap-2 text-[11px]">
-                    <div
-                      className="w-5 h-5 rounded-full grid place-items-center text-[8.5px] font-bold shrink-0 ring-1"
-                      style={{
-                        background: `${op.accent}26`,
-                        color: op.accent,
-                        boxShadow: `inset 0 0 0 1px ${op.accent}66`,
-                      }}
-                    >
-                      {op.initials}
-                    </div>
-                    <span className="text-theme-text-primary truncate flex-1">{op.name}</span>
-                    <div className="w-14 h-1 rounded-full bg-theme-bg-tertiary overflow-hidden shrink-0">
-                      <div className="h-full rounded-full" style={{ width: `${pct}%`, background: op.accent, boxShadow: `0 0 6px ${op.accent}88` }} />
-                    </div>
-                    <span className="text-[10px] font-mono text-theme-text-muted w-7 text-right tabular-nums">{c}</span>
-                  </div>
-                )
-              })
-            })()}
-          </div>
         </div>
 
         {/* Smart suggestion — heuristic based on today's saturation */}
@@ -1738,174 +1703,6 @@ export default function CarWashCalendarTab({ onNewBooking }: CarWashCalendarTabP
           </div>
         </div>
       )}
-    </div>
-  )
-}
-
-// ============================================================
-// Operatori view (virtual lanes)
-// ============================================================
-const OP_CELL_HEIGHT = 12       // px per 5-min row
-const OP_START_HOUR = 8
-const OP_END_HOUR = 17
-const OP_TOTAL_SLOTS = ((OP_END_HOUR - OP_START_HOUR) * 60) / 5
-function OperatoriPanel({
-  bookings,
-  currentDate,
-  searchQuery,
-  onSelectBooking,
-}: {
-  bookings: CarWashBooking[]
-  currentDate: Date
-  searchQuery: string
-  onSelectBooking: (b: CarWashBooking) => void
-}) {
-  const dayBookings = bookings.filter(b => {
-    if (isRientroBooking(b)) return false
-    const bd = new Date(b.appointment_date)
-    if (
-      bd.getFullYear() !== currentDate.getFullYear() ||
-      bd.getMonth() !== currentDate.getMonth() ||
-      bd.getDate() !== currentDate.getDate()
-    ) return false
-    if (!searchQuery) return true
-    const q = searchQuery.toLowerCase()
-    return (
-      b.customer_name?.toLowerCase().includes(q) ||
-      b.service_name?.toLowerCase().includes(q) ||
-      b.vehicle_plate?.toLowerCase().includes(q) ||
-      b.vehicle_name?.toLowerCase().includes(q)
-    )
-  })
-
-  const lanes: CarWashBooking[][] = VIRTUAL_OPERATORS.map(() => [])
-  dayBookings.forEach(b => {
-    lanes[hashOperatorIndex(b.id, VIRTUAL_OPERATORS.length)].push(b)
-  })
-
-  return (
-    <div className="relative z-10 flex-1 overflow-auto flex flex-col w-full bg-theme-bg-primary dark:bg-[linear-gradient(180deg,#0a0d14_0%,#070a10_100%)] text-theme-text-primary">
-      {/* Sticky operator header */}
-      <div className="sticky top-0 z-[40] flex bg-theme-bg-secondary dark:bg-black/40 shadow-md border-b border-theme-border backdrop-blur-md">
-        <div className="sticky left-0 w-[70px] shrink-0 z-[41] bg-theme-bg-secondary dark:bg-black/40 border-r border-theme-border flex items-center justify-center text-[10px] font-bold uppercase tracking-wider text-theme-text-muted backdrop-blur-md" style={{ height: 58 }}>
-          Orario
-        </div>
-        <div className="flex flex-1 min-w-max">
-          {VIRTUAL_OPERATORS.map(op => (
-            <div key={op.id} className="flex-1 min-w-[160px] border-r border-theme-border px-3 py-2 flex items-center gap-2" style={{ height: 58 }}>
-              <div
-                className="relative w-9 h-9 rounded-full grid place-items-center text-[11px] font-bold shrink-0 ring-1"
-                style={{
-                  background: `${op.accent}26`,
-                  color: op.accent,
-                  boxShadow: `inset 0 0 0 1px ${op.accent}66`,
-                }}
-              >
-                {op.initials}
-                <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-emerald-400 ring-2 ring-theme-bg-secondary" />
-              </div>
-              <div className="min-w-0 leading-tight">
-                <div className="text-[12px] font-semibold text-theme-text-primary truncate">{op.name}</div>
-                {op.role && <div className="text-[9.5px] uppercase tracking-wider text-theme-text-muted">{op.role}</div>}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Body */}
-      <div className="flex min-w-max relative">
-        {/* Time column */}
-        <div className="sticky left-0 w-[70px] shrink-0 z-[30] bg-theme-bg-secondary dark:bg-black/40 border-r border-theme-border backdrop-blur-md">
-          {Array.from({ length: OP_TOTAL_SLOTS }, (_, i) => {
-            const totalMin = i * 5
-            const hr = OP_START_HOUR + Math.floor(totalMin / 60)
-            const min = totalMin % 60
-            const isHour = min === 0
-            const isHalf = min === 30
-            if (!isHour && !isHalf) return <div key={i} style={{ height: OP_CELL_HEIGHT }} />
-            return (
-              <div
-                key={i}
-                style={{ height: OP_CELL_HEIGHT }}
-                className={`flex items-center justify-end pr-2 text-[10px] tabular-nums ${isHour ? 'font-bold text-theme-text-primary' : 'font-normal text-theme-text-muted'}`}
-              >
-                {String(hr).padStart(2, '0')}:{String(min).padStart(2, '0')}
-              </div>
-            )
-          })}
-        </div>
-
-        {/* Lanes */}
-        <div className="flex flex-1">
-          {VIRTUAL_OPERATORS.map((op, opIdx) => (
-            <div
-              key={op.id}
-              className="flex-1 min-w-[160px] border-r border-theme-border relative"
-              style={{ height: OP_TOTAL_SLOTS * OP_CELL_HEIGHT }}
-            >
-              {/* Hour grid lines */}
-              {Array.from({ length: OP_END_HOUR - OP_START_HOUR + 1 }, (_, i) => (
-                <div
-                  key={i}
-                  className="absolute inset-x-0 border-t border-theme-border/40"
-                  style={{ top: i * 12 * OP_CELL_HEIGHT }}
-                />
-              ))}
-              {lanes[opIdx].length === 0 && (
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <span className="text-[10px] text-theme-text-muted italic">Slot liberi</span>
-                </div>
-              )}
-              {lanes[opIdx].map(b => {
-                const [h, m] = (b.appointment_time || '09:00').split(':').map(Number)
-                const startMin = ((h - OP_START_HOUR) * 60) + (m || 0)
-                const dur = getServiceDuration(b.service_name, b.booking_details?.vehicleCategory, b.booking_details)
-                const top = Math.max(0, (startMin / 5) * OP_CELL_HEIGHT)
-                const height = Math.max(OP_CELL_HEIGHT * 2, (dur / 5) * OP_CELL_HEIGHT - 2)
-                const paid = isPaidBooking(b)
-                const pendingLink = !paid && isPendingPaymentLink(b)
-                const hasNotesFlag = hasNotes(b)
-                const tone = paid
-                  ? 'from-emerald-500 to-emerald-700 border-emerald-300/40'
-                  : pendingLink
-                    ? 'from-amber-500 to-amber-700 border-amber-300/40'
-                    : 'from-red-700 to-red-900 border-red-500/40'
-                const glow = paid
-                  ? '0 4px 16px -4px rgba(16,185,129,0.5)'
-                  : pendingLink
-                    ? '0 4px 16px -4px rgba(245,158,11,0.5)'
-                    : '0 4px 16px -4px rgba(220,38,38,0.5)'
-                return (
-                  <div
-                    key={b.id}
-                    onClick={(e) => { e.stopPropagation(); onSelectBooking(b) }}
-                    className={`absolute left-1.5 right-1.5 rounded-md border bg-gradient-to-br ${tone} overflow-hidden cursor-pointer transition-all hover:-translate-y-0.5`}
-                    style={{
-                      top: `${top + 1}px`,
-                      height: `${height}px`,
-                      boxShadow: hasNotesFlag ? `inset 0 0 0 2px #FACC15, ${glow}` : glow,
-                    }}
-                  >
-                    <div className="absolute inset-0 bg-gradient-to-t from-black/30 to-transparent pointer-events-none" />
-                    <div className="relative p-1.5 flex flex-col h-full text-white">
-                      <div className="flex items-center justify-between gap-1 mb-0.5">
-                        <span className="text-[10px] font-bold tabular-nums opacity-90">{b.appointment_time}</span>
-                        {hasNotesFlag && <span className="text-[10px]">★</span>}
-                      </div>
-                      <div className="text-[11px] font-bold leading-tight truncate">{b.customer_name}</div>
-                      <div className="text-[10px] font-medium leading-tight truncate opacity-90">{b.service_name}</div>
-                      {b.vehicle_plate && (
-                        <div className="mt-auto text-[9px] font-mono opacity-80 truncate">{b.vehicle_plate}</div>
-                      )}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          ))}
-        </div>
-      </div>
     </div>
   )
 }
