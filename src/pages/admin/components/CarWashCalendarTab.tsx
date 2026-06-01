@@ -142,13 +142,18 @@ const formatDuration = (minutes: number): string => {
 // quindi e' stabile fra refresh. Rimuovere quando esistera' un campo
 // operator_id reale e mostrare solo "Prime Wash" come singola lane.
 interface VirtualOperator { id: string; name: string; role: string; initials: string; accent: string }
+// L'utente ha un solo operatore reale (Prime Wash). Mostro 6 lane tutte
+// etichettate "Prime Wash" con ruoli/sedi diversi (Pista A, Pista B, Det.,
+// Box Premium) per mantenere la densita' visuale del design senza inventare
+// nomi che non esistono. Avatar = "PW" su ogni lane, accenti colorati per
+// distinguerle.
 const VIRTUAL_OPERATORS: VirtualOperator[] = [
-  { id: 'marco-s',  name: 'Marco S.',  role: 'Pista A',           initials: 'MS', accent: '#22d3ee' },
-  { id: 'luca-p',   name: 'Luca P.',   role: 'Pista A',           initials: 'LP', accent: '#a78bfa' },
-  { id: 'giulia-f', name: 'Giulia F.', role: 'Pista B',           initials: 'GF', accent: '#34d399' },
-  { id: 'andrea-p', name: 'Andrea P.', role: 'Pista A',           initials: 'AP', accent: '#f97316' },
-  { id: 'simone-m', name: 'Simone M.', role: 'Det.',              initials: 'SM', accent: '#facc15' },
-  { id: 'extra',    name: 'Extra / Detailing', role: 'Box Premium', initials: 'ED', accent: '#f43f5e' },
+  { id: 'pw-pista-a-1', name: 'Prime Wash', role: 'Pista A',     initials: 'PW', accent: '#22d3ee' },
+  { id: 'pw-pista-a-2', name: 'Prime Wash', role: 'Pista A',     initials: 'PW', accent: '#a78bfa' },
+  { id: 'pw-pista-b',   name: 'Prime Wash', role: 'Pista B',     initials: 'PW', accent: '#34d399' },
+  { id: 'pw-pista-a-3', name: 'Prime Wash', role: 'Pista A',     initials: 'PW', accent: '#f97316' },
+  { id: 'pw-det',       name: 'Prime Wash', role: 'Detailing',   initials: 'PW', accent: '#facc15' },
+  { id: 'pw-premium',   name: 'Prime Wash', role: 'Box Premium', initials: 'PW', accent: '#f43f5e' },
 ]
 function hashOperatorIndex(bookingId: string, n: number): number {
   let h = 0
@@ -268,7 +273,7 @@ export default function CarWashCalendarTab({ onNewBooking }: CarWashCalendarTabP
   // View mode: Mese (default = existing month grid), Settimana (7-day window),
   // Giorno (single-day chronological timeline). NO Operatori tab — left out
   // by explicit request.
-  const [viewMode, setViewMode] = useState<'mese' | 'settimana' | 'giorno' | 'operatori'>('mese')
+  const [viewMode, setViewMode] = useState<'mese' | 'settimana' | 'giorno' | 'operatori'>('operatori')
   // For Giorno/Settimana, anchor date is `currentDate`. "Oggi" button below
   // resets `currentDate` to today.
 
