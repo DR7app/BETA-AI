@@ -472,7 +472,7 @@ export default function AdminDashboard() {
             perche' sta sopra al nero. */}
         <div className="relative px-3 py-3 flex items-center justify-center bg-black">
           <img
-            src="/DR7logo1.png"
+            src="/dr7-logo.png"
             alt="DR7 A.I."
             className="max-h-10 max-w-[120px] w-auto h-auto object-contain"
           />

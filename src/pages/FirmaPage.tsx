@@ -238,7 +238,7 @@ export default function FirmaPage() {
         <div className="min-h-screen bg-gray-50">
             {/* Header */}
             <div className="bg-black text-white py-4 px-6 flex items-center justify-between">
-                <img src="/DR7logo1.png" alt="DR7" className="h-10" />
+                <img src="/dr7-logo.png" alt="DR7" className="h-10" />
                 <span className="text-sm text-gray-400">Firma Elettronica</span>
             </div>
 
